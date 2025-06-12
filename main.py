@@ -1,113 +1,225 @@
-import logging
 import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from database import init_db, get_customer, get_payment_history, save_payment
-from excel_handler import save_excel
-from payment_handler import create_payment, verify_payment
-from config import BOT_TOKEN, ADMIN_ID
+import logging
+import asyncio
+from datetime import datetime, timedelta
 
-# تنظیمات لاگ
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+from flask import Flask, request
+from telegram import (
+    Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    InlineKeyboardButton, InlineKeyboardMarkup
+)
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters, ConversationHandler
 )
 
+from config import BOT_TOKEN, WEBHOOK_URL, ADMIN_ID
+from secure_database import init_db, get_customer, get_all_customers, save_payment, get_payment_history
+from payment_handler import create_payment, verify_payment
+from excel_handler import save_excel
+
+# Logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# شروع بات
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "سلام! شماره موبایل خود را وارد کنید تا اطلاعات قسط شما بررسی شود."
-    )
+# Flask app for webhook callback
+flask_app = Flask(__name__)
 
-# مدیریت پیام‌ها (شماره موبایل)
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = update.message.text.strip()
+# Telegram bot app
+app = Application.builder().token(BOT_TOKEN).build()
+
+# Conversation states
+(A_WAIT_CONTACT, A_WAIT_CUSTOMER_QUERY) = range(2)
+user_states = {}
+
+# Inline keyboards
+def get_customer_panel(customer):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 مشاهده اقساط", callback_data="show_installments")],
+        [InlineKeyboardButton("💳 پرداخت قسط", callback_data="pay_installment")],
+        [InlineKeyboardButton("📊 مجموع بدهی", callback_data="total_debt")],
+        [InlineKeyboardButton("🧾 سابقه پرداخت", callback_data="history")],
+        [InlineKeyboardButton("✉️ پیام پشتیبانی", callback_data="support_msg")],
+    ])
+
+def get_admin_panel():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 ارسال پیام ‌به همه", callback_data="send_all")],
+        [InlineKeyboardButton("📤 ارسال پیام ‌به بدهکاران", callback_data="send_debtors")],
+        [InlineKeyboardButton("📅 اقساط امروز", callback_data="due_today")],
+        [InlineKeyboardButton("✅ پرداخت‌های امروز", callback_data="paid_today")],
+        [InlineKeyboardButton("📈 گزارش کامل", callback_data="report")],
+        [InlineKeyboardButton("🔍 جستجوی مشتری", callback_data="find_customer")],
+        [InlineKeyboardButton("⏰ تنظیم یادآوری", callback_data="schedule_reminder")],
+    ])
+
+# /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if str(user_id) == ADMIN_ID:
+        await update.message.reply_text("🔧 پنل مدیریت:", reply_markup=get_admin_panel())
+    else:
+        button = KeyboardButton("📞 ارسال شماره", request_contact=True)
+        markup = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text("لطفاً شماره تماس خود را ارسال کنید:", reply_markup=markup)
+        return A_WAIT_CONTACT
+
+# Handle contact
+async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    phone = update.message.contact.phone_number.replace("+98", "0")
     customer = get_customer(phone)
     if not customer:
-        await update.message.reply_text("اطلاعاتی برای این شماره یافت نشد یا قبلاً پرداخت شده است.")
-        return
+        await update.message.reply_text("❌ مشتری با این شماره یافت نشد.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
 
-    msg = (
-        f"🧾 اطلاعات قسط شما:\n"
-        f"👤 نام: {customer['name']}\n"
-        f"📞 شماره: {customer['phone']}\n"
-        f"💰 مبلغ: {customer['amount']} تومان\n"
-        f"📅 موعد: {customer['due_date']}\n"
-    )
+    user_states[user.id] = customer
+    await update.message.reply_text(f"👋 سلام {customer['name']}!", reply_markup=get_customer_panel(customer))
+    return ConversationHandler.END
 
-    keyboard = [[
-        InlineKeyboardButton("پرداخت قسط", callback_data=f"pay|{customer['phone']}|{customer['amount']}|{customer['installment_id']}")
-    ]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(msg, reply_markup=reply_markup)
-
-# دکمه پرداخت
-async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Button handler
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
+    data = query.data
 
-    if query.data.startswith("pay"):
-        _, phone, amount, inst_id = query.data.split("|")
-        authority, link, err = create_payment(int(amount), phone, inst_id)
-        if err:
-            await query.edit_message_text(f"خطا: {err}")
-            return
-        save_payment(phone, int(amount), inst_id, "INIT", authority)
-        await query.edit_message_text(f"لینک پرداخت شما:\n{link}")
+    if str(user_id) == ADMIN_ID:
+        await handle_admin_buttons(query, context)
+    else:
+        await handle_customer_buttons(query, context)
 
-# فرمان مدیریت
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.message.from_user.id) != ADMIN_ID:
-        await update.message.reply_text("شما اجازه دسترسی به این بخش را ندارید.")
+# Admin buttons
+async def handle_admin_buttons(query, context):
+    data = query.data
+    if data in ("send_all", "send_debtors"):
+        await query.message.reply_text("📤 لطفاً متن پیام را ارسال کنید:")
+        user_states[int(query.from_user.id)] = {'state': data}
+    elif data == "due_today":
+        today = datetime.now().date()
+        items = [(c['name'], c['due_date'], c['amount']) for c in get_all_customers()
+                 if datetime.strptime(c['due_date'], "%Y/%m/%d").date() == today]
+        text = "\n".join(f"{n}: {a:,} تومان ({d})" for n, d, a in items) or "هیچ قسطی امروز موعد ندارد."
+        await query.message.reply_text("📅 اقساط امروز:\n" + text)
+    elif data == "paid_today":
+        await query.message.reply_text("✅ قابلیت در حال توسعه است.")
+    elif data == "find_customer":
+        await query.message.reply_text("🔍 لطفاً نام یا شماره مشتری را وارد کنید:")
+        user_states[int(query.from_user.id)] = {'state': "find_customer"}
+    elif data == "schedule_reminder":
+        await query.message.reply_text("⏰ قابلیت زمان‌بندی در حال توسعه است.")
+    else:
+        await query.message.reply_text("📈 این قابلیت در حال توسعه است.")
+
+# Customer buttons
+async def handle_customer_buttons(query, context):
+    user_id = query.from_user.id
+    user = user_states.get(user_id)
+    if not user:
+        await query.message.reply_text("❗ لطفاً ابتدا شماره تماس خود را ارسال کنید.")
         return
-    await update.message.reply_text("لطفاً فایل اکسل را ارسال کنید.")
 
-# هندلر فایل اکسل
-async def handle_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.message.from_user.id) != ADMIN_ID:
-        await update.message.reply_text("دسترسی ندارید.")
-        return
+    data = query.data
+    phone = user['phone']
 
-    file = await update.message.document.get_file()
-    file_path = f"temp/{file.file_id}.xlsx"
-    os.makedirs("temp", exist_ok=True)
-    await file.download_to_drive(file_path)
-    success, msg = save_excel(file_path)
-    os.remove(file_path)
-    await update.message.reply_text(msg)
-
-# نمایش تاریخچه پرداخت
-async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("لطفاً شماره موبایل خود را وارد کنید تا سوابق پرداخت نمایش داده شود.")
-    context.user_data['awaiting_history'] = True
-
-# بررسی شماره برای تاریخچه پرداخت
-async def check_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('awaiting_history'):
-        context.user_data['awaiting_history'] = False
-        phone = update.message.text.strip()
+    if data == "show_installments":
+        await query.message.reply_text(f"🔍 جزئیات قسط:\nشناسه: {user['installment_id']}\nمبلغ: {user['amount']:,} تومان\nموعد: {user['due_date']}")
+    elif data == "pay_installment":
+        authority, url, err = create_payment(user['amount'], phone, user['installment_id'])
+        if url:
+            await query.message.reply_text(f"🔗 برای پرداخت روی لینک زیر کلیک کنید:\n{url}")
+            save_payment(phone, user['amount'], user['installment_id'], "pending", authority)
+        else:
+            await query.message.reply_text(f"❌ خطا در ایجاد لینک: {err}")
+    elif data == "total_debt":
+        await query.message.reply_text(f"💰 مجموع بدهی شما: {user['amount']:,} تومان")
+    elif data == "history":
         history = get_payment_history(phone)
-        if not history:
-            await update.message.reply_text("پرداختی یافت نشد.")
-            return
+        if history:
+            txt = "\n".join(f"{r['installment_id']}: {r['amount']:,} تومان — {r['status']} در {r['timestamp']}" for r in history)
+        else:
+            txt = "هیچ سابقه پرداختی یافت نشد."
+        await query.message.reply_text("🧾 سابقه پرداخت:\n" + txt)
+    elif data == "support_msg":
+        await query.message.reply_text("✉️ لطفاً پیام خود را ارسال کنید:")
+        user_states[user_id] = {'state': 'supporting'}
+    else:
+        await query.message.reply_text("📌 این گزینه در حال توسعه است.")
 
-        msg = "💳 سوابق پرداخت:\n"
-        for item in history:
-            msg += f"\n💰 {item['amount']} تومان - شناسه {item['installment_id']} - {item['status']} - {item['timestamp']}"
-        await update.message.reply_text(msg)
+# Text handler for admin/customer support & find_customer
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    state = user_states.get(user_id, {}).get('state')
+
+    if state in ("send_all", "send_debtors"):
+        text = update.message.text
+        targets = get_all_customers()
+        if state == "send_debtors":
+            targets = [c for c in targets if not c.get('paid')]
+        count = 0
+        for c in targets:
+            await context.bot.send_message(chat_id=int(c['phone']), text=text)
+            count += 1
+        await update.message.reply_text(f"✅ پیام ارسال شد به {count} کاربر.")
+        user_states.pop(user_id, None)
+
+    elif state == "find_customer":
+        query = update.message.text
+        customer = get_customer(query) or next((c for c in get_all_customers() if c['name'] == query), None)
+        if customer:
+            await update.message.reply_text(f"یافت شد: {customer['name']}", reply_markup=get_customer_panel(customer))
+        else:
+            await update.message.reply_text("❌ مشتری یافت نشد.")
+        user_states.pop(user_id, None)
+
+    elif state == "supporting":
+        await context.bot.send_message(chat_id=int(ADMIN_ID),
+                                       text=f"✉️ پشتیبانی:\nاز {update.message.from_user.full_name}:\n{update.message.text}")
+        await update.message.reply_text("✅ پیام شما برای پشتیبانی ارسال شد.")
+        user_states.pop(user_id, None)
+
+# Zarinpal callback (Flask)
+@flask_app.route('/callback')
+def callback_route():
+    authority = request.args.get('Authority')
+    status = request.args.get('Status')
+    # Ideally map authority -> phone & amount via DB or cache
+    # For simplicity, reply plain text
+    return "پرداخت شما با وضعیت: " + status
+
+# Set webhook
+def main():
+    init_db()
+
+    # Telegram handlers
+    conv = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            A_WAIT_CONTACT: [MessageHandler(filters.CONTACT, contact_handler)],
+        },
+        fallbacks=[]
+    )
+    app.add_handler(conv)
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
+    # Start reminder job
+    async def job(ctx):
+        today = datetime.now().date()
+        customers = get_all_customers()
+        for c in customers:
+            if datetime.strptime(c['due_date'], "%Y/%m/%d").date() == today:
+                await app.bot.send_message(chat_id=ADMIN_ID, text=f"⏰ موعد قسط برای {c['name']} امروز است.")
+    app.job_queue.run_daily(job, time=datetime.now().time())
+
+    # Run
+    app.run_webhook(
+        listen='0.0.0.0',
+        port=int(os.getenv('PORT', 8443)),
+        url_path='/webhook',
+        webhook_url=WEBHOOK_URL + '/webhook'
+    )
+    flask_app.run(port=5000)
 
 if __name__ == '__main__':
-    init_db()
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("admin", admin))
-    application.add_handler(CommandHandler("history", history))
-    application.add_handler(CallbackQueryHandler(handle_button))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_excel))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), check_history))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-
-    application.run_polling()
+    main()
