@@ -4,9 +4,9 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    Filters,
     CallbackQueryHandler,
     ContextTypes,
+    filters,  # استفاده از filters به جای Filters
 )
 from telegram import (
     Update,
@@ -22,6 +22,7 @@ from payment_handler import create_payment, verify_payment
 from database import init_db, get_customer, get_all_customers, save_payment, get_payment_history
 from flask import Flask, request
 import asyncio
+import os
 from datetime import datetime, timedelta
 
 # Initialize Flask for webhook and callback
