@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN, WEBHOOK_URL, ADMIN_ID
-from secure_database import init_db, get_customer, get_all_customers, save_payment, get_payment_history
+from database import init_db, get_customer, get_all_customers, save_payment, get_payment_history
 from payment_handler import create_payment, verify_payment
 from excel_handler import save_excel
 
