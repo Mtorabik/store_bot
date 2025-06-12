@@ -13,7 +13,7 @@ WEBHOOK_URL = "https://store-bot-x95i.onrender.com"  # جای YOUR_RENDER_URL ر
 CALLBACK_URL = f"{WEBHOOK_URL}/callback"
 
 # آیدی ادمین (آیدی تلگرامی شما)
-ADMIN_ID = "2087562572"  # جای YOUR_ADMIN_ID را با آیدی خود پر کنید (از @userinfobot بگیرید)
+ADMIN_ID = "7776838673"  # جای YOUR_ADMIN_ID را با آیدی خود پر کنید (از @userinfobot بگیرید)
 
 # کلید رمزنگاری برای پایگاه داده
 ENCRYPTION_KEY = "ya1j3fnm0DPnsi3uIZJP5utNC1OXNmwHmwxCoerm38o="  # یک کلید 32 بایتی تولید کنید (مثلاً با: python -c "import os; print(os.urandom(32).hex())")
