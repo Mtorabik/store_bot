@@ -24,6 +24,7 @@ from flask import Flask, request
 import asyncio
 import os
 import logging
+from datetime import datetime, timedelta  # اضافه کردن import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -178,7 +179,7 @@ def webhook():
 async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Send reminders for upcoming due dates."""
     customers = get_all_customers()
-    today = datetime.now().date()
+    today = datetime.now().date()  # حالا که datetime import شده، این خط کار می‌کنه
     for customer in customers:
         due_date = datetime.strptime(customer['due_date'], '%Y/%m/%d').date()
         if due_date - today <= timedelta(days=3) and due_date >= today:
@@ -201,7 +202,6 @@ def main():
         url_path="/webhook",
         webhook_url=WEBHOOK_URL + "/webhook"
     )
-    # حذف flask_app.run، چون app.run_webhook کافی هست
 
 if __name__ == '__main__':
     main()
