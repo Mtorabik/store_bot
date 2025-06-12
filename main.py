@@ -6,7 +6,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters,  # استفاده از filters به جای Filters
+    filters,
 )
 from telegram import (
     Update,
@@ -23,9 +23,13 @@ from database import init_db, get_customer, get_all_customers, save_payment, get
 from flask import Flask, request
 import asyncio
 import os
-from datetime import datetime, timedelta
+import logging
 
-# Initialize Flask for webhook and callback
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize Flask for webhook
 flask_app = Flask(__name__)
 
 # Initialize bot
@@ -161,17 +165,15 @@ def payment_callback():
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
-      import logging
-      logging.basicConfig(level=logging.INFO)
-      logger = logging.getLogger(__name__)
-      data = request.get_json(force=True)
-      if not data:
-          logger.error("No data received")
-          return "No data", 400
-      logger.info("Received update: %s", data)
-      update = Update.de_json(data, app.bot)
-      asyncio.run(app.process_update(update))
-      return 'OK'
+    """Handle Telegram webhook."""
+    data = request.get_json(force=True)
+    if not data:
+        logger.error("No data received")
+        return "No data", 400
+    logger.info("Received update: %s", data)
+    update = Update.de_json(data, app.bot)
+    asyncio.run(app.process_update(update))
+    return 'OK'
 
 async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Send reminders for upcoming due dates."""
@@ -199,7 +201,7 @@ def main():
         url_path="/webhook",
         webhook_url=WEBHOOK_URL + "/webhook"
     )
-    flask_app.run(host="0.0.0.0", port=8443)
+    # حذف flask_app.run، چون app.run_webhook کافی هست
 
 if __name__ == '__main__':
     main()
