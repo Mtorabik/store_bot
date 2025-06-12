@@ -1,19 +1,19 @@
 # config.py
 
 # توکن ربات از BotFather
-BOT_TOKEN = "YOUR_BOT_TOKEN"  # جای YOUR_BOT_TOKEN را با توکن ربات پر کنید
+BOT_TOKEN = "7303920308:AAGkKWdxNsFyq6VgbuwSKihoXLCfDYdZ6yo"  # جای YOUR_BOT_TOKEN را با توکن ربات پر کنید
 
 # مرچنت‌کد زرین‌پال
-MERCHANT_ID = "YOUR_MERCHANT_ID"  # جای YOUR_MERCHANT_ID را با مرچنت‌کد پر کنید
+MERCHANT_ID = "c1cbc49e-23ff-454a-8e7f-d13a1b78903e"  # جای YOUR_MERCHANT_ID را با مرچنت‌کد پر کنید
 
 # آدرس Webhook (از Render می‌گیرید)
-WEBHOOK_URL = "YOUR_RENDER_URL"  # جای YOUR_RENDER_URL را بعد از استقرار پر کنید
+WEBHOOK_URL = "https://store-bot-x95i.onrender.com"  # جای YOUR_RENDER_URL را بعد از استقرار پر کنید
 
 # آدرس کال‌بک زرین‌پال
 CALLBACK_URL = f"{WEBHOOK_URL}/callback"
 
 # آیدی ادمین (آیدی تلگرامی شما)
-ADMIN_ID = "YOUR_ADMIN_ID"  # جای YOUR_ADMIN_ID را با آیدی خود پر کنید (از @userinfobot بگیرید)
+ADMIN_ID = "2087562572"  # جای YOUR_ADMIN_ID را با آیدی خود پر کنید (از @userinfobot بگیرید)
 
 # کلید رمزنگاری برای پایگاه داده
-ENCRYPTION_KEY = "YOUR_SECURE_KEY_32_BYTES"  # یک کلید 32 بایتی تولید کنید (مثلاً با: python -c "import os; print(os.urandom(32).hex())")
+ENCRYPTION_KEY = "ya1j3fnm0DPnsi3uIZJP5utNC1OXNmwHmwxCoerm38o="  # یک کلید 32 بایتی تولید کنید (مثلاً با: python -c "import os; print(os.urandom(32).hex())")
