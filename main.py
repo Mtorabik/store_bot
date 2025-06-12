@@ -1,225 +1,128 @@
-import os
 import logging
-import asyncio
-from datetime import datetime, timedelta
-
-from flask import Flask, request
-from telegram import (
-    Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
-    InlineKeyboardButton, InlineKeyboardMarkup
-)
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters, ConversationHandler
-)
-
-from config import BOT_TOKEN, WEBHOOK_URL, ADMIN_ID
-from database import init_db, get_customer, get_all_customers, save_payment, get_payment_history
+import telebot
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from config import BOT_TOKEN, ADMIN_ID
+from secure_database import get_customer, get_all_customers, save_payment, get_payment_history
 from payment_handler import create_payment, verify_payment
 from excel_handler import save_excel
+from datetime import datetime
 
-# Logging
+# Initialize bot and logging
+bot = telebot.TeleBot(BOT_TOKEN)
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Flask app for webhook callback
-flask_app = Flask(__name__)
+# Keyboards for customers and admin
+customer_buttons = ReplyKeyboardMarkup(resize_keyboard=True)
+customer_buttons.add(KeyboardButton('پرداخت قسط'), KeyboardButton('وضعیت پرداخت‌ها'))
 
-# Telegram bot app
-app = Application.builder().token(BOT_TOKEN).build()
+admin_buttons = InlineKeyboardMarkup(row_width=2)
+admin_buttons.add(
+    InlineKeyboardButton('لیست مشتریان', callback_data='list_customers'),
+    InlineKeyboardButton('پرداخت‌ها', callback_data='list_payments')
+)
+admin_buttons.add(
+    InlineKeyboardButton('آپلود فایل اکسل', callback_data='upload_excel'),
+    InlineKeyboardButton('بستن پنل مدیریت', callback_data='close_admin_panel')
+)
 
-# Conversation states
-(A_WAIT_CONTACT, A_WAIT_CUSTOMER_QUERY) = range(2)
-user_states = {}
+# Helper Functions
+def send_admin_panel(chat_id):
+    """Send admin panel with buttons."""
+    bot.send_message(chat_id, "پنل مدیریت:", reply_markup=admin_buttons)
 
-# Inline keyboards
-def get_customer_panel(customer):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 مشاهده اقساط", callback_data="show_installments")],
-        [InlineKeyboardButton("💳 پرداخت قسط", callback_data="pay_installment")],
-        [InlineKeyboardButton("📊 مجموع بدهی", callback_data="total_debt")],
-        [InlineKeyboardButton("🧾 سابقه پرداخت", callback_data="history")],
-        [InlineKeyboardButton("✉️ پیام پشتیبانی", callback_data="support_msg")],
-    ])
-
-def get_admin_panel():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 ارسال پیام ‌به همه", callback_data="send_all")],
-        [InlineKeyboardButton("📤 ارسال پیام ‌به بدهکاران", callback_data="send_debtors")],
-        [InlineKeyboardButton("📅 اقساط امروز", callback_data="due_today")],
-        [InlineKeyboardButton("✅ پرداخت‌های امروز", callback_data="paid_today")],
-        [InlineKeyboardButton("📈 گزارش کامل", callback_data="report")],
-        [InlineKeyboardButton("🔍 جستجوی مشتری", callback_data="find_customer")],
-        [InlineKeyboardButton("⏰ تنظیم یادآوری", callback_data="schedule_reminder")],
-    ])
-
-# /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if str(user_id) == ADMIN_ID:
-        await update.message.reply_text("🔧 پنل مدیریت:", reply_markup=get_admin_panel())
+def toggle_keyboard(chat_id, open: bool):
+    """Toggle the visibility of the keyboard."""
+    if open:
+        bot.send_message(chat_id, "دکمه‌ها باز شدند", reply_markup=admin_buttons)
     else:
-        button = KeyboardButton("📞 ارسال شماره", request_contact=True)
-        markup = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
-        await update.message.reply_text("لطفاً شماره تماس خود را ارسال کنید:", reply_markup=markup)
-        return A_WAIT_CONTACT
+        bot.send_message(chat_id, "دکمه‌ها بسته شدند", reply_markup=ReplyKeyboardMarkup())
 
-# Handle contact
-async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    phone = update.message.contact.phone_number.replace("+98", "0")
-    customer = get_customer(phone)
-    if not customer:
-        await update.message.reply_text("❌ مشتری با این شماره یافت نشد.", reply_markup=ReplyKeyboardRemove())
-        return ConversationHandler.END
-
-    user_states[user.id] = customer
-    await update.message.reply_text(f"👋 سلام {customer['name']}!", reply_markup=get_customer_panel(customer))
-    return ConversationHandler.END
-
-# Button handler
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
-
-    if str(user_id) == ADMIN_ID:
-        await handle_admin_buttons(query, context)
+def get_user_info(chat_id):
+    """Get customer data from the database."""
+    customer = get_customer(chat_id)
+    if customer:
+        bot.send_message(chat_id, f"نام: {customer['name']}\nمبلغ قسط: {customer['amount']}\nموعد قسط: {customer['due_date']}")
     else:
-        await handle_customer_buttons(query, context)
+        bot.send_message(chat_id, "مشتری پیدا نشد!")
 
-# Admin buttons
-async def handle_admin_buttons(query, context):
-    data = query.data
-    if data in ("send_all", "send_debtors"):
-        await query.message.reply_text("📤 لطفاً متن پیام را ارسال کنید:")
-        user_states[int(query.from_user.id)] = {'state': data}
-    elif data == "due_today":
-        today = datetime.now().date()
-        items = [(c['name'], c['due_date'], c['amount']) for c in get_all_customers()
-                 if datetime.strptime(c['due_date'], "%Y/%m/%d").date() == today]
-        text = "\n".join(f"{n}: {a:,} تومان ({d})" for n, d, a in items) or "هیچ قسطی امروز موعد ندارد."
-        await query.message.reply_text("📅 اقساط امروز:\n" + text)
-    elif data == "paid_today":
-        await query.message.reply_text("✅ قابلیت در حال توسعه است.")
-    elif data == "find_customer":
-        await query.message.reply_text("🔍 لطفاً نام یا شماره مشتری را وارد کنید:")
-        user_states[int(query.from_user.id)] = {'state': "find_customer"}
-    elif data == "schedule_reminder":
-        await query.message.reply_text("⏰ قابلیت زمان‌بندی در حال توسعه است.")
+def handle_payment_request(chat_id, phone, amount, installment_id):
+    """Handle payment request for customers."""
+    authority, payment_link, error = create_payment(amount, phone, installment_id)
+    if payment_link:
+        bot.send_message(chat_id, f"لینک پرداخت شما: {payment_link}")
+        save_payment(phone, amount, installment_id, "pending", authority)
     else:
-        await query.message.reply_text("📈 این قابلیت در حال توسعه است.")
+        bot.send_message(chat_id, f"خطا: {error}")
 
-# Customer buttons
-async def handle_customer_buttons(query, context):
-    user_id = query.from_user.id
-    user = user_states.get(user_id)
-    if not user:
-        await query.message.reply_text("❗ لطفاً ابتدا شماره تماس خود را ارسال کنید.")
-        return
-
-    data = query.data
-    phone = user['phone']
-
-    if data == "show_installments":
-        await query.message.reply_text(f"🔍 جزئیات قسط:\nشناسه: {user['installment_id']}\nمبلغ: {user['amount']:,} تومان\nموعد: {user['due_date']}")
-    elif data == "pay_installment":
-        authority, url, err = create_payment(user['amount'], phone, user['installment_id'])
-        if url:
-            await query.message.reply_text(f"🔗 برای پرداخت روی لینک زیر کلیک کنید:\n{url}")
-            save_payment(phone, user['amount'], user['installment_id'], "pending", authority)
-        else:
-            await query.message.reply_text(f"❌ خطا در ایجاد لینک: {err}")
-    elif data == "total_debt":
-        await query.message.reply_text(f"💰 مجموع بدهی شما: {user['amount']:,} تومان")
-    elif data == "history":
-        history = get_payment_history(phone)
-        if history:
-            txt = "\n".join(f"{r['installment_id']}: {r['amount']:,} تومان — {r['status']} در {r['timestamp']}" for r in history)
-        else:
-            txt = "هیچ سابقه پرداختی یافت نشد."
-        await query.message.reply_text("🧾 سابقه پرداخت:\n" + txt)
-    elif data == "support_msg":
-        await query.message.reply_text("✉️ لطفاً پیام خود را ارسال کنید:")
-        user_states[user_id] = {'state': 'supporting'}
+# Command Handlers
+@bot.message_handler(commands=['start'])
+def start(message):
+    """Start command - show main menu."""
+    if message.chat.id == ADMIN_ID:
+        send_admin_panel(message.chat.id)
     else:
-        await query.message.reply_text("📌 این گزینه در حال توسعه است.")
+        bot.send_message(message.chat.id, "سلام! از دکمه‌ها برای شروع استفاده کنید.", reply_markup=customer_buttons)
 
-# Text handler for admin/customer support & find_customer
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    state = user_states.get(user_id, {}).get('state')
+@bot.message_handler(func=lambda message: message.text == "پرداخت قسط")
+def handle_installment_payment(message):
+    """Handle installment payment requests."""
+    customer = get_customer(message.chat.id)
+    if customer:
+        bot.send_message(message.chat.id, "لطفاً مبلغ قسط را وارد کنید.")
+        bot.register_next_step_handler(message, process_payment_amount, customer['phone'], customer['installment_id'])
+    else:
+        bot.send_message(message.chat.id, "مشتری پیدا نشد!")
 
-    if state in ("send_all", "send_debtors"):
-        text = update.message.text
-        targets = get_all_customers()
-        if state == "send_debtors":
-            targets = [c for c in targets if not c.get('paid')]
-        count = 0
-        for c in targets:
-            await context.bot.send_message(chat_id=int(c['phone']), text=text)
-            count += 1
-        await update.message.reply_text(f"✅ پیام ارسال شد به {count} کاربر.")
-        user_states.pop(user_id, None)
+def process_payment_amount(message, phone, installment_id):
+    """Process the amount entered by the user."""
+    try:
+        amount = int(message.text)
+        handle_payment_request(message.chat.id, phone, amount, installment_id)
+    except ValueError:
+        bot.send_message(message.chat.id, "مبلغ وارد شده صحیح نیست. لطفاً دوباره امتحان کنید.")
+        bot.register_next_step_handler(message, process_payment_amount, phone, installment_id)
 
-    elif state == "find_customer":
-        query = update.message.text
-        customer = get_customer(query) or next((c for c in get_all_customers() if c['name'] == query), None)
-        if customer:
-            await update.message.reply_text(f"یافت شد: {customer['name']}", reply_markup=get_customer_panel(customer))
-        else:
-            await update.message.reply_text("❌ مشتری یافت نشد.")
-        user_states.pop(user_id, None)
+@bot.message_handler(func=lambda message: message.text == "وضعیت پرداخت‌ها")
+def handle_payment_status(message):
+    """Show payment status for the customer."""
+    payment_history = get_payment_history(message.chat.id)
+    if payment_history:
+        response = "\n".join([f"شناسه قسط: {p['installment_id']}\nمبلغ: {p['amount']}\nوضعیت: {p['status']}\nتاریخ: {p['timestamp']}" for p in payment_history])
+        bot.send_message(message.chat.id, response)
+    else:
+        bot.send_message(message.chat.id, "هیچ پرداختی پیدا نشد.")
 
-    elif state == "supporting":
-        await context.bot.send_message(chat_id=int(ADMIN_ID),
-                                       text=f"✉️ پشتیبانی:\nاز {update.message.from_user.full_name}:\n{update.message.text}")
-        await update.message.reply_text("✅ پیام شما برای پشتیبانی ارسال شد.")
-        user_states.pop(user_id, None)
+# Admin Commands
+@bot.callback_query_handler(func=lambda call: call.data == 'list_customers')
+def list_customers(call):
+    """Show all customers to the admin."""
+    customers = get_all_customers()
+    if customers:
+        response = "\n".join([f"{c['name']} - {c['phone']}\nمبلغ: {c['amount']}\nموعد قسط: {c['due_date']}" for c in customers])
+        bot.send_message(call.message.chat.id, response)
+    else:
+        bot.send_message(call.message.chat.id, "هیچ مشتریی پیدا نشد.")
 
-# Zarinpal callback (Flask)
-@flask_app.route('/callback')
-def callback_route():
-    authority = request.args.get('Authority')
-    status = request.args.get('Status')
-    # Ideally map authority -> phone & amount via DB or cache
-    # For simplicity, reply plain text
-    return "پرداخت شما با وضعیت: " + status
+@bot.callback_query_handler(func=lambda call: call.data == 'list_payments')
+def list_payments(call):
+    """Show all payments to the admin."""
+    payments = get_all_payments()
+    if payments:
+        response = "\n".join([f"شناسه قسط: {p['installment_id']}\nمبلغ: {p['amount']}\nوضعیت: {p['status']}\nتاریخ: {p['timestamp']}" for p in payments])
+        bot.send_message(call.message.chat.id, response)
+    else:
+        bot.send_message(call.message.chat.id, "هیچ پرداختی پیدا نشد.")
 
-# Set webhook
-def main():
-    init_db()
+@bot.callback_query_handler(func=lambda call: call.data == 'upload_excel')
+def upload_excel(call):
+    """Handle Excel file upload for admin."""
+    bot.send_message(call.message.chat.id, "لطفاً فایل اکسل را ارسال کنید.")
 
-    # Telegram handlers
-    conv = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
-        states={
-            A_WAIT_CONTACT: [MessageHandler(filters.CONTACT, contact_handler)],
-        },
-        fallbacks=[]
-    )
-    app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+@bot.callback_query_handler(func=lambda call: call.data == 'close_admin_panel')
+def close_admin_panel(call):
+    """Close admin panel."""
+    toggle_keyboard(call.message.chat.id, open=False)
 
-    # Start reminder job
-    async def job(ctx):
-        today = datetime.now().date()
-        customers = get_all_customers()
-        for c in customers:
-            if datetime.strptime(c['due_date'], "%Y/%m/%d").date() == today:
-                await app.bot.send_message(chat_id=ADMIN_ID, text=f"⏰ موعد قسط برای {c['name']} امروز است.")
-    app.job_queue.run_daily(job, time=datetime.now().time())
-
-    # Run
-    app.run_webhook(
-        listen='0.0.0.0',
-        port=int(os.getenv('PORT', 8443)),
-        url_path='/webhook',
-        webhook_url=WEBHOOK_URL + '/webhook'
-    )
-    flask_app.run(port=5000)
-
+# Start the bot
 if __name__ == '__main__':
-    main()
+    bot.polling(none_stop=True)
