@@ -161,10 +161,17 @@ def payment_callback():
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
-    """Handle Telegram webhook."""
-    update = Update.de_json(request.get_json(force=True), app.bot)
-    asyncio.run(app.process_update(update))
-    return 'OK'
+      import logging
+      logging.basicConfig(level=logging.INFO)
+      logger = logging.getLogger(__name__)
+      data = request.get_json(force=True)
+      if not data:
+          logger.error("No data received")
+          return "No data", 400
+      logger.info("Received update: %s", data)
+      update = Update.de_json(data, app.bot)
+      asyncio.run(app.process_update(update))
+      return 'OK'
 
 async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Send reminders for upcoming due dates."""
